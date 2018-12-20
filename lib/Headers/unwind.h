@@ -76,7 +76,7 @@ typedef intptr_t _sleb128_t;
 typedef uintptr_t _uleb128_t;
 
 struct _Unwind_Context;
-#if defined(__arm__) && !(defined(__USING_SJLJ_EXCEPTIONS__) || defined(__ARM_DWARF_EH___))
+#if defined(__arm__) && !(defined(__USING_SJLJ_EXCEPTIONS__) || defined(__ARM_DWARF_EH__))
 struct _Unwind_Control_Block;
 typedef struct _Unwind_Control_Block _Unwind_Exception; /* Alias */
 #else
@@ -117,7 +117,7 @@ typedef enum {
 typedef void (*_Unwind_Exception_Cleanup_Fn)(_Unwind_Reason_Code,
                                              _Unwind_Exception *);
 
-#if defined(__arm__) && !(defined(__USING_SJLJ_EXCEPTIONS__) || defined(__ARM_DWARF_EH___))
+#if defined(__arm__) && !(defined(__USING_SJLJ_EXCEPTIONS__) || defined(__ARM_DWARF_EH__))
 typedef struct _Unwind_Control_Block _Unwind_Control_Block;
 typedef uint32_t _Unwind_EHT_Header;
 
@@ -154,8 +154,12 @@ struct _Unwind_Control_Block {
 struct _Unwind_Exception {
   _Unwind_Exception_Class exception_class;
   _Unwind_Exception_Cleanup_Fn exception_cleanup;
+#if !defined (__USING_SJLJ_EXCEPTIONS__) && defined (__SEH__)
+  _Unwind_Word private_[6];
+#else
   _Unwind_Word private_1;
   _Unwind_Word private_2;
+#endif
   /* The Itanium ABI requires that _Unwind_Exception objects are "double-word
    * aligned".  GCC has interpreted this to mean "use the maximum useful
    * alignment for the target"; so do we. */
@@ -177,7 +181,7 @@ typedef _Unwind_Personality_Fn __personality_routine;
 typedef _Unwind_Reason_Code (*_Unwind_Trace_Fn)(struct _Unwind_Context *,
                                                 void *);
 
-#if defined(__arm__) && !(defined(__USING_SJLJ_EXCEPTIONS__) || defined(__ARM_DWARF_EH___))
+#if defined(__arm__) && !(defined(__USING_SJLJ_EXCEPTIONS__) || defined(__ARM_DWARF_EH__))
 typedef enum {
   _UVRSC_CORE = 0,        /* integer register */
   _UVRSC_VFP = 1,         /* vfp */

@@ -26,6 +26,8 @@ void RefactoringOptionSet::print(llvm::raw_ostream &OS) const {
   }
 }
 
+namespace llvm {
+namespace yaml {
 template <> struct CustomMappingTraits<RefactoringOptionSet> {
   static void inputOne(IO &YamlIn, StringRef Key,
                        RefactoringOptionSet &Result) {
@@ -44,6 +46,8 @@ template <> struct CustomMappingTraits<RefactoringOptionSet> {
     llvm_unreachable("Output is done without mapping traits");
   }
 };
+}
+}
 
 llvm::Expected<RefactoringOptionSet>
 RefactoringOptionSet::parse(StringRef Source) {
@@ -57,7 +61,7 @@ RefactoringOptionSet::parse(StringRef Source) {
   return std::move(Result);
 }
 
-void RefactoringOption::serialize(const SerializationContext &) {}
+void OldRefactoringOption::serialize(const SerializationContext &) {}
 
 void clang::tooling::option::detail::BoolOptionBase::serializeImpl(
     const SerializationContext &Context, const char *Name) {

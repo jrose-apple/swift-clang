@@ -99,8 +99,8 @@ public:
       LexicallyNestedDeclarations.clear();
       for (++I; I != E; ++I) {
         Decl *Sibling = *I;
-        if (!SM.isBeforeInTranslationUnit(Sibling->getLocStart(),
-                                          Child->getLocEnd()))
+        if (!SM.isBeforeInTranslationUnit(Sibling->getBeginLoc(),
+                                          Child->getEndLoc()))
           break;
         if (!BaseType::canIgnoreChildDeclWhileTraversingDeclContext(Sibling))
           LexicallyNestedDeclarations.push_back(Sibling);
@@ -109,6 +109,33 @@ public:
         return false;
     }
     return true;
+  }
+
+  Stmt::child_range getStmtChildren(Stmt *S) { return S->children(); }
+
+  SmallVector<Stmt *, 8> getStmtChildren(CXXOperatorCallExpr *CE) {
+    SmallVector<Stmt *, 8> Children(CE->children());
+    bool Swap;
+    // Switch the operator and the first operand for all infix and postfix
+    // operations.
+    switch (CE->getOperator()) {
+    case OO_Arrow:
+    case OO_Call:
+    case OO_Subscript:
+      Swap = true;
+      break;
+    case OO_PlusPlus:
+    case OO_MinusMinus:
+      // These are postfix unless there is exactly one argument.
+      Swap = Children.size() != 2;
+      break;
+    default:
+      Swap = CE->isInfixBinaryOp();
+      break;
+    }
+    if (Swap && Children.size() > 1)
+      std::swap(Children[0], Children[1]);
+    return Children;
   }
 
 private:

@@ -253,7 +253,7 @@ namespace FunctionPointers {
 
   static_assert(1 + Apply(Select(4), 5) + Apply(Select(3), 7) == 42, "");
 
-  constexpr int Invalid = Apply(Select(0), 0); // expected-error {{must be initialized by a constant expression}} expected-note {{in call to 'Apply(0, 0)'}}
+  constexpr int Invalid = Apply(Select(0), 0); // expected-error {{must be initialized by a constant expression}} expected-note {{in call to 'Apply(nullptr, 0)'}}
 
 }
 
@@ -328,7 +328,7 @@ struct Str {
 
 extern char externalvar[];
 constexpr bool constaddress = (void *)externalvar == (void *)0x4000UL; // expected-error {{must be initialized by a constant expression}} expected-note {{reinterpret_cast}}
-constexpr bool litaddress = "foo" == "foo"; // expected-error {{must be initialized by a constant expression}} expected-warning {{unspecified}}
+constexpr bool litaddress = "foo" == "foo"; // expected-error {{must be initialized by a constant expression}}
 static_assert(0 != "foo", "");
 
 }
@@ -364,7 +364,7 @@ void foo() {
   constexpr B b3 { { 1 }, { 2 } }; // expected-error {{constant expression}} expected-note {{reference to temporary}} expected-note {{here}}
 }
 
-constexpr B &&b4 = ((1, 2), 3, 4, B { {10}, {{20}} }); // expected-warning 4{{unused}}
+constexpr B &&b4 = ((1, 2), 3, 4, B { {10}, {{20}} });
 static_assert(&b4 != &b2, "");
 
 // Proposed DR: copy-elision doesn't trigger lifetime extension.
@@ -528,7 +528,7 @@ constexpr int xs6 = p[3]; // expected-error {{constant expression}} expected-not
 constexpr int xs0 = p[-3]; // ok
 constexpr int xs_1 = p[-4]; // expected-error {{constant expression}} expected-note {{cannot refer to element -1}}
 
-constexpr int zs[2][2][2][2] = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 };
+constexpr int zs[2][2][2][2] = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 }; // expected-note {{array 'zs' declared here}}
 static_assert(zs[0][0][0][0] == 1, "");
 static_assert(zs[1][1][1][1] == 16, "");
 static_assert(zs[0][0][0][2] == 3, ""); // expected-error {{constant expression}} expected-note {{read of dereferenced one-past-the-end pointer}}
@@ -536,7 +536,10 @@ static_assert((&zs[0][0][0][2])[-1] == 2, "");
 static_assert(**(**(zs + 1) + 1) == 11, "");
 static_assert(*(&(&(*(*&(&zs[2] - 1)[0] + 2 - 2))[2])[-1][-1] + 1) == 11, ""); // expected-error {{constant expression}} expected-note {{cannot refer to element -1 of array of 2 elements in a constant expression}}
 static_assert(*(&(&(*(*&(&zs[2] - 1)[0] + 2 - 2))[2])[-1][2] - 2) == 11, "");
-constexpr int err_zs_1_2_0_0 = zs[1][2][0][0]; // expected-error {{constant expression}} expected-note {{cannot access array element of pointer past the end}}
+constexpr int err_zs_1_2_0_0 = zs[1][2][0][0]; // \
+expected-error {{constant expression}} \
+expected-note {{cannot access array element of pointer past the end}} \
+expected-warning {{array index 2 is past the end of the array (which contains 2 elements)}}
 
 constexpr int fail(const int &p) {
   return (&p)[64]; // expected-note {{cannot refer to element 64 of array of 2 elements}}
@@ -604,20 +607,35 @@ static_assert(NATDCArray{}[1][1].n == 0, "");
 
 }
 
-// Tests for indexes into arrays of unknown bounds.
+// Per current CWG direction, we reject any cases where pointer arithmetic is
+// not statically known to be valid.
 namespace ArrayOfUnknownBound {
-  // This is a corner case of the language where it's not clear whether this
-  // should be an error: When we see the initializer for Z::a, the bounds of
-  // Z::b aren't known yet, but they will be known by the end of the translation
-  // unit, so the compiler can in theory check the indexing into Z::b.
-  // For the time being, as long as this is unclear, we want to make sure that
-  // this compiles.
-  struct Z {
-    static const void *const a[];
-    static const void *const b[];
+  extern int arr[];
+  constexpr int *a = arr;
+  constexpr int *b = &arr[0];
+  static_assert(a == b, "");
+  constexpr int *c = &arr[1]; // expected-error {{constant}} expected-note {{indexing of array without known bound}}
+  constexpr int *d = &a[1]; // expected-error {{constant}} expected-note {{indexing of array without known bound}}
+  constexpr int *e = a + 1; // expected-error {{constant}} expected-note {{indexing of array without known bound}}
+
+  struct X {
+    int a;
+    int b[]; // expected-warning {{C99}}
   };
-  constexpr const void *Z::a[] = {&b[0], &b[1]};
-  constexpr const void *Z::b[] = {&a[0], &a[1]};
+  extern X x;
+  constexpr int *xb = x.b; // expected-error {{constant}} expected-note {{not supported}}
+
+  struct Y { int a; };
+  extern Y yarr[];
+  constexpr Y *p = yarr;
+  constexpr int *q = &p->a;
+
+  extern const int carr[]; // expected-note {{here}}
+  constexpr int n = carr[0]; // expected-error {{constant}} expected-note {{non-constexpr variable}}
+
+  constexpr int local_extern[] = {1, 2, 3};
+  void f() { extern const int local_extern[]; }
+  static_assert(local_extern[1] == 2, "");
 }
 
 namespace DependentValues {
@@ -1537,13 +1555,13 @@ namespace CompoundLiteral {
 
   // Other kinds are not.
   struct X { int a[2]; };
-  constexpr int *n = (X){1, 2}.a; // expected-warning {{C99}} expected-warning {{temporary array}}
+  constexpr int *n = (X){1, 2}.a; // expected-warning {{C99}} expected-warning {{temporary}}
   // expected-error@-1 {{constant expression}}
   // expected-note@-2 {{pointer to subobject of temporary}}
   // expected-note@-3 {{temporary created here}}
 
   void f() {
-    static constexpr int *p = (int*)(int[1]){3}; // expected-warning {{C99}}
+    static constexpr int *p = (int*)(int[1]){3}; // expected-warning {{C99}} expected-warning {{temporary}}
     // expected-error@-1 {{constant expression}}
     // expected-note@-2 {{pointer to subobject of temporary}}
     // expected-note@-3 {{temporary created here}}
@@ -1874,14 +1892,15 @@ namespace Lifetime {
   }
 
   constexpr int &get(int &&n) { return n; }
+  constexpr int &&get_rv(int &&n) { return static_cast<int&&>(n); }
   struct S {
-    int &&r; // expected-note 2{{declared here}}
+    int &&r;
     int &s;
     int t;
-    constexpr S() : r(0), s(get(0)), t(r) {} // expected-warning {{temporary}}
-    constexpr S(int) : r(0), s(get(0)), t(s) {} // expected-warning {{temporary}} expected-note {{read of object outside its lifetime}}
+    constexpr S() : r(get_rv(0)), s(get(0)), t(r) {} // expected-note {{read of object outside its lifetime}}
+    constexpr S(int) : r(get_rv(0)), s(get(0)), t(s) {} // expected-note {{read of object outside its lifetime}}
   };
-  constexpr int k1 = S().t; // ok, int is lifetime-extended to end of constructor
+  constexpr int k1 = S().t; // expected-error {{constant expression}} expected-note {{in call}}
   constexpr int k2 = S(0).t; // expected-error {{constant expression}} expected-note {{in call}}
 }
 
@@ -1920,6 +1939,22 @@ namespace Bitfields {
     };
     static_assert(X::f(3) == -1, "3 should truncate to -1");
   }
+
+  struct HasUnnamedBitfield {
+    unsigned a;
+    unsigned : 20;
+    unsigned b;
+
+    constexpr HasUnnamedBitfield() : a(), b() {}
+    constexpr HasUnnamedBitfield(unsigned a, unsigned b) : a(a), b(b) {}
+  };
+
+  void testUnnamedBitfield() {
+    const HasUnnamedBitfield zero{};
+    int a = 1 / zero.b; // expected-warning {{division by zero is undefined}}
+    const HasUnnamedBitfield oneZero{1, 0};
+    int b = 1 / oneZero.b; // expected-warning {{division by zero is undefined}}
+  }
 }
 
 namespace ZeroSizeTypes {
@@ -1937,9 +1972,9 @@ namespace ZeroSizeTypes {
 namespace BadDefaultInit {
   template<int N> struct X { static const int n = N; };
 
-  struct A {
+  struct A { // expected-error {{default member initializer for 'k' needed within definition of enclosing class}}
     int k = // expected-note {{default member initializer declared here}}
-        X<A().k>::n; // expected-error {{default member initializer for 'k' needed within definition of enclosing class}}
+        X<A().k>::n; // expected-note {{in evaluation of exception specification for 'BadDefaultInit::A::A' needed here}}
   };
 
   // FIXME: The "constexpr constructor must initialize all members" diagnostic
@@ -1965,7 +2000,7 @@ namespace NeverConstantTwoWays {
 
   constexpr int n = // expected-error {{must be initialized by a constant expression}}
       (int *)(long)&n == &n ? // expected-note {{reinterpret_cast}}
-        1 / 0 : // expected-warning {{division by zero}}
+        1 / 0 :
         0;
 }
 

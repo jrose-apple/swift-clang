@@ -1,7 +1,5 @@
 // Makes sure it doesn't crash.
 
-// XFAIL: linux
-
 // RUN: rm -rf %t
 // RUN: %clang_cc1 %s -index-store-path %t/idx -std=c++14
 // RUN: c-index-test core -print-record %t/idx | FileCheck %s
@@ -12,7 +10,7 @@ auto getit() { return []() {}; }
 }
 
 namespace crash2 {
-// CHECK: [[@LINE+2]]:7 | class(Gen)/C++ | c:@N@crash2@ST>1#T@Foo | Ref,RelCont | rel: 1
+// CHECK: [[@LINE+2]]:7 | class(Gen)/C++ | c:@N@crash2@ST>1#T@Foo | Decl,RelChild | rel: 1
 template <typename T>
 class Foo; // canonical decl
 

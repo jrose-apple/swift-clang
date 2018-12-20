@@ -13,16 +13,13 @@
 
 #ifndef LLVM_CLANG_API_NOTES_TYPES_H
 #define LLVM_CLANG_API_NOTES_TYPES_H
+#include "clang/Basic/LLVM.h"
 #include "clang/Basic/Specifiers.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/Optional.h"
 #include "llvm/ADT/StringRef.h"
 #include <cassert>
 #include <climits>
-
-namespace llvm {
-  class raw_ostream;
-}
 
 namespace clang {
 namespace api_notes {
@@ -33,11 +30,6 @@ static const char SOURCE_APINOTES_EXTENSION[] = "apinotes";
 /// The file extension used for the binary representation of API notes.
 static const char BINARY_APINOTES_EXTENSION[] = "apinotesc";
 
-using llvm::ArrayRef;
-using llvm::StringRef;
-using llvm::Optional;
-using llvm::None;
-
 /// Opaque context ID used to refer to an Objective-C class or protocol.
 class ContextID {
 public:
@@ -45,6 +37,15 @@ public:
 
   explicit ContextID(unsigned value) : Value(value) { }
 };
+
+enum class RetainCountConventionKind {
+  None,
+  CFReturnsRetained,
+  CFReturnsNotRetained,
+  NSReturnsRetained,
+  NSReturnsNotRetained,
+};
+
 
 /// Describes API notes data for any entity.
 ///
@@ -447,8 +448,14 @@ class ParamInfo : public VariableInfo {
   /// Whether the this parameter has the 'noescape' attribute.
   unsigned NoEscape : 1;
 
+  /// A biased RetainCountConventionKind, where 0 means "unspecified".
+  ///
+  /// Only relevant for out-parameters.
+  unsigned RawRetainCountConvention : 3;
+
 public:
-  ParamInfo() : VariableInfo(), NoEscapeSpecified(false), NoEscape(false) { }
+  ParamInfo() : VariableInfo(), NoEscapeSpecified(false), NoEscape(false),
+      RawRetainCountConvention() { }
 
   Optional<bool> isNoEscape() const {
     if (!NoEscapeSpecified) return None;
@@ -464,19 +471,35 @@ public:
     }
   }
 
+  Optional<RetainCountConventionKind> getRetainCountConvention() const {
+    if (!RawRetainCountConvention)
+      return None;
+    return static_cast<RetainCountConventionKind>(RawRetainCountConvention - 1);
+  }
+  void setRetainCountConvention(Optional<RetainCountConventionKind> convention){
+    if (convention)
+      RawRetainCountConvention = static_cast<unsigned>(convention.getValue())+1;
+    else
+      RawRetainCountConvention = 0;
+    assert(getRetainCountConvention() == convention && "bitfield too small");
+  }
+
   friend ParamInfo &operator|=(ParamInfo &lhs, const ParamInfo &rhs) {
     static_cast<VariableInfo &>(lhs) |= rhs;
     if (!lhs.NoEscapeSpecified && rhs.NoEscapeSpecified) {
       lhs.NoEscapeSpecified = true;
       lhs.NoEscape = rhs.NoEscape;
     }
+    if (!lhs.RawRetainCountConvention)
+      lhs.RawRetainCountConvention = rhs.RawRetainCountConvention;
     return lhs;
   }
 
   friend bool operator==(const ParamInfo &lhs, const ParamInfo &rhs) {
     return static_cast<const VariableInfo &>(lhs) == rhs &&
            lhs.NoEscapeSpecified == rhs.NoEscapeSpecified &&
-           lhs.NoEscape == rhs.NoEscape;
+           lhs.NoEscape == rhs.NoEscape &&
+           lhs.RawRetainCountConvention == rhs.RawRetainCountConvention;
   }
 
   friend bool operator!=(const ParamInfo &lhs, const ParamInfo &rhs) {
@@ -511,6 +534,9 @@ public:
   /// Number of types whose nullability is encoded with the NullabilityPayload.
   unsigned NumAdjustedNullable : 8;
 
+  /// A biased RetainCountConventionKind, where 0 means "unspecified".
+  unsigned RawRetainCountConvention : 3;
+
   /// Stores the nullability of the return type and the parameters.
   //  NullabilityKindSize bits are used to encode the nullability. The info
   //  about the return type is stored at position 0, followed by the nullability
@@ -526,7 +552,8 @@ public:
   FunctionInfo()
     : CommonEntityInfo(),
       NullabilityAudited(false),
-      NumAdjustedNullable(0) { }
+      NumAdjustedNullable(0),
+      RawRetainCountConvention() { }
 
   static unsigned getMaxNullabilityIndex() {
     return ((sizeof(NullabilityPayload) * CHAR_BIT)/NullabilityKindSize);
@@ -579,13 +606,27 @@ public:
     return getTypeInfo(0);
   }
 
+  Optional<RetainCountConventionKind> getRetainCountConvention() const {
+    if (!RawRetainCountConvention)
+      return None;
+    return static_cast<RetainCountConventionKind>(RawRetainCountConvention - 1);
+  }
+  void setRetainCountConvention(Optional<RetainCountConventionKind> convention){
+    if (convention)
+      RawRetainCountConvention = static_cast<unsigned>(convention.getValue())+1;
+    else
+      RawRetainCountConvention = 0;
+    assert(getRetainCountConvention() == convention && "bitfield too small");
+  }
+
   friend bool operator==(const FunctionInfo &lhs, const FunctionInfo &rhs) {
     return static_cast<const CommonEntityInfo &>(lhs) == rhs &&
            lhs.NullabilityAudited == rhs.NullabilityAudited &&
            lhs.NumAdjustedNullable == rhs.NumAdjustedNullable &&
            lhs.NullabilityPayload == rhs.NullabilityPayload &&
            lhs.ResultType == rhs.ResultType &&
-           lhs.Params == rhs.Params;
+           lhs.Params == rhs.Params &&
+           lhs.RawRetainCountConvention == rhs.RawRetainCountConvention;
   }
 
   friend bool operator!=(const FunctionInfo &lhs, const FunctionInfo &rhs) {

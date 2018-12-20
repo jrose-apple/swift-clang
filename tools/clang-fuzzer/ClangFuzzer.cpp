@@ -8,7 +8,7 @@
 //===----------------------------------------------------------------------===//
 ///
 /// \file
-/// \brief This file implements a function that runs Clang on a single
+/// This file implements a function that runs Clang on a single
 ///  input. This function is then linked into the Fuzzer library.
 ///
 //===----------------------------------------------------------------------===//
@@ -16,6 +16,8 @@
 #include "handle-cxx/handle_cxx.h"
 
 using namespace clang_fuzzer;
+
+extern "C" int LLVMFuzzerInitialize(int *argc, char ***argv) { return 0; }
 
 extern "C" int LLVMFuzzerTestOneInput(uint8_t *data, size_t size) {
   std::string s((const char *)data, size);

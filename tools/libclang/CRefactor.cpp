@@ -26,6 +26,7 @@
 #include "clang/Frontend/CompilerInvocation.h"
 #include "clang/Frontend/Utils.h"
 #include "clang/Index/USRGeneration.h"
+#include "clang/Tooling/CompilationDatabase.h"
 #include "clang/Tooling/Refactor/IndexerQuery.h"
 #include "clang/Tooling/Refactor/RefactoringActionFinder.h"
 #include "clang/Tooling/Refactor/RefactoringActions.h"
@@ -52,6 +53,7 @@ translateRefactoringActionType(CXRefactoringActionType Action) {
     return RefactoringActionType::Name;
 #include "clang/Tooling/Refactor/RefactoringActions.def"
   }
+  llvm_unreachable("unknown CXRefactoringActionType value");
 }
 
 static CXRefactoringActionType
@@ -62,6 +64,7 @@ translateRefactoringActionType(RefactoringActionType Action) {
     return CXRefactor_##Name;
 #include "clang/Tooling/Refactor/RefactoringActions.def"
   }
+  llvm_unreachable("unknown RefactoringActionType value");
 }
 
 static CXSymbolOccurrenceKind
@@ -79,7 +82,10 @@ translateOccurrenceKind(rename::OldSymbolOccurrence::OccurrenceKind Kind) {
     return CXSymbolOccurrence_MatchingDocCommentString;
   case rename::OldSymbolOccurrence::MatchingFilename:
     return CXSymbolOccurrence_MatchingFilename;
+  case rename::OldSymbolOccurrence::MatchingStringLiteral:
+    return CXSymbolOccurrence_MatchingStringLiteral;
   }
+  llvm_unreachable("unknown OccurrenceKind value");
 }
 
 namespace {
@@ -509,6 +515,9 @@ translateIndexedOccurrenceKind(CXCursorKind Kind) {
   }
 }
 
+/// ClangTool::run is not thread-safe, so we have to guard it.
+static llvm::ManagedStatic<llvm::sys::Mutex> ClangToolConstructionMutex;
+
 // TODO: Remove
 CXErrorCode performIndexedFileRename(
     ArrayRef<CXRenamedIndexedSymbol> Symbols, StringRef Filename,
@@ -571,6 +580,7 @@ CXErrorCode performIndexedFileRename(
                            public rename::IndexedFileOccurrenceConsumer {
     ArrayRef<CXRenamedIndexedSymbol> Symbols;
     ArrayRef<rename::IndexedSymbol> IndexedSymbols;
+    rename::IndexedFileRenamerLock &Lock;
     const RefactoringOptionSet *Options;
 
   public:
@@ -579,13 +589,14 @@ CXErrorCode performIndexedFileRename(
 
     ToolRunner(ArrayRef<CXRenamedIndexedSymbol> Symbols,
                ArrayRef<rename::IndexedSymbol> IndexedSymbols,
+               rename::IndexedFileRenamerLock &Lock,
                const RefactoringOptionSet *Options)
-        : Symbols(Symbols), IndexedSymbols(IndexedSymbols), Options(Options),
-          Result(nullptr), Err(CXError_Success) {}
+        : Symbols(Symbols), IndexedSymbols(IndexedSymbols), Lock(Lock),
+          Options(Options), Result(nullptr), Err(CXError_Success) {}
 
     clang::FrontendAction *create() override {
       return new rename::IndexedFileOccurrenceProducer(IndexedSymbols, *this,
-                                                       Options);
+                                                       Lock, Options);
     }
 
     void handleOccurrence(const rename::OldSymbolOccurrence &Occurrence,
@@ -607,7 +618,9 @@ CXErrorCode performIndexedFileRename(
     }
   };
 
-  auto Runner = llvm::make_unique<ToolRunner>(Symbols, IndexedSymbols, Options);
+  rename::IndexedFileRenamerLock Lock(*ClangToolConstructionMutex);
+  auto Runner =
+      llvm::make_unique<ToolRunner>(Symbols, IndexedSymbols, Lock, Options);
 
   // Run a clang tool on the input file.
   std::string Name = Filename.str();
@@ -671,26 +684,31 @@ CXErrorCode performIndexedSymbolSearch(
       IndexedOccurrences.push_back(Result);
     }
 
-    IndexedSymbols.emplace_back(OldSymbolName(Symbol.Name, IsObjCSelector),
-                                IndexedOccurrences,
-                                /*IsObjCSelector=*/IsObjCSelector);
+    IndexedSymbols.emplace_back(
+        OldSymbolName(Symbol.Name, IsObjCSelector), IndexedOccurrences,
+        /*IsObjCSelector=*/IsObjCSelector,
+        /*SearchForStringLiteralOccurrences=*/
+        Symbol.CursorKind == CXCursor_ObjCInterfaceDecl);
   }
 
   class ToolRunner final : public FrontendActionFactory,
                            public rename::IndexedFileOccurrenceConsumer {
     ArrayRef<rename::IndexedSymbol> IndexedSymbols;
+    rename::IndexedFileRenamerLock &Lock;
     const RefactoringOptionSet *Options;
 
   public:
     SymbolOccurrencesResult *Result;
 
     ToolRunner(ArrayRef<rename::IndexedSymbol> IndexedSymbols,
+               rename::IndexedFileRenamerLock &Lock,
                const RefactoringOptionSet *Options)
-        : IndexedSymbols(IndexedSymbols), Options(Options), Result(nullptr) {}
+        : IndexedSymbols(IndexedSymbols), Lock(Lock), Options(Options),
+          Result(nullptr) {}
 
     clang::FrontendAction *create() override {
       return new rename::IndexedFileOccurrenceProducer(IndexedSymbols, *this,
-                                                       Options);
+                                                       Lock, Options);
     }
 
     void handleOccurrence(const rename::OldSymbolOccurrence &Occurrence,
@@ -706,7 +724,8 @@ CXErrorCode performIndexedSymbolSearch(
     }
   };
 
-  auto Runner = llvm::make_unique<ToolRunner>(IndexedSymbols, Options);
+  rename::IndexedFileRenamerLock Lock(*ClangToolConstructionMutex);
+  auto Runner = llvm::make_unique<ToolRunner>(IndexedSymbols, Lock, Options);
 
   // Run a clang tool on the input file.
   std::string Name = Filename.str();
@@ -910,6 +929,8 @@ public:
               std::string(clang_getCString(
                   FileReplacements[I - NumRemoved - 1].ReplacementString)) +
               RefReplacement.ReplacementString;
+          clang_disposeString(
+              FileReplacements[I - NumRemoved - 1].ReplacementString);
           FileReplacements[I - NumRemoved - 1].ReplacementString =
               cxstring::createDup(Replacement);
           NumRemoved++;
@@ -969,6 +990,8 @@ public:
                 std::string(clang_getCString(
                     FileReplacements[I - NumRemoved - 1].ReplacementString)) +
                 RefReplacement.ReplacementString;
+            clang_disposeString(
+                FileReplacements[I - NumRemoved - 1].ReplacementString);
             FileReplacements[I - NumRemoved - 1].ReplacementString =
                 cxstring::createDup(Replacement);
             NumRemoved++;
@@ -1271,12 +1294,12 @@ clang_RefactoringAction_getSourceRangeOfInterest(CXRefactoringAction Action) {
       if (const Stmt *S = Operation->getTransformedStmt()) {
         SourceRange Range = S->getSourceRange();
         if (const Stmt *Last = Operation->getLastTransformedStmt())
-          Range.setEnd(Last->getLocEnd());
+          Range.setEnd(Last->getEndLoc());
         return cxloc::translateSourceRange(CXXUnit->getASTContext(), Range);
       } else if (const Decl *D = Operation->getTransformedDecl()) {
         SourceRange Range = D->getSourceRange();
         if (const Decl *Last = Operation->getLastTransformedDecl())
-          Range.setEnd(Last->getLocEnd());
+          Range.setEnd(Last->getEndLoc());
         return cxloc::translateSourceRange(CXXUnit->getASTContext(), Range);
       }
     }

@@ -8,7 +8,7 @@
 //===----------------------------------------------------------------------===//
 ///
 /// \file
-/// \brief This file implements FormatTokenLexer, which tokenizes a source file
+/// This file implements FormatTokenLexer, which tokenizes a source file
 /// into a FormatToken stream suitable for ClangFormat.
 ///
 //===----------------------------------------------------------------------===//
@@ -24,10 +24,10 @@ namespace clang {
 namespace format {
 
 FormatTokenLexer::FormatTokenLexer(const SourceManager &SourceMgr, FileID ID,
-                                   const FormatStyle &Style,
+                                   unsigned Column, const FormatStyle &Style,
                                    encoding::Encoding Encoding)
     : FormatTok(nullptr), IsFirstToken(true), StateStack({LexerState::NORMAL}),
-      Column(0), TrailingWhitespace(0), SourceMgr(SourceMgr), ID(ID),
+      Column(Column), TrailingWhitespace(0), SourceMgr(SourceMgr), ID(ID),
       Style(Style), IdentTable(getFormattingLangOpts(Style)),
       Keywords(IdentTable), Encoding(Encoding), FirstInLineIndex(0),
       FormattingDisabled(false), MacroBlockBeginRegex(Style.MacroBlockBegin),
@@ -37,8 +37,9 @@ FormatTokenLexer::FormatTokenLexer(const SourceManager &SourceMgr, FileID ID,
   Lex->SetKeepWhitespaceMode(true);
 
   for (const std::string &ForEachMacro : Style.ForEachMacros)
-    ForEachMacros.push_back(&IdentTable.get(ForEachMacro));
-  std::sort(ForEachMacros.begin(), ForEachMacros.end());
+    Macros.insert({&IdentTable.get(ForEachMacro), TT_ForEachMacro});
+  for (const std::string &StatementMacro : Style.StatementMacros)
+    Macros.insert({&IdentTable.get(StatementMacro), TT_StatementMacro});
 }
 
 ArrayRef<FormatToken *> FormatTokenLexer::lex() {
@@ -50,6 +51,8 @@ ArrayRef<FormatToken *> FormatTokenLexer::lex() {
       tryParseJSRegexLiteral();
       handleTemplateStrings();
     }
+    if (Style.Language == FormatStyle::LK_TextProto)
+      tryParsePythonComment();
     tryMergePreviousTokens();
     if (Tokens.back()->NewlinesBefore > 0 || Tokens.back()->IsMultiline)
       FirstInLineIndex = Tokens.size() - 1;
@@ -96,14 +99,8 @@ void FormatTokenLexer::tryMergePreviousTokens() {
   }
 
   if (Style.Language == FormatStyle::LK_Java) {
-    static const tok::TokenKind JavaRightLogicalShift[] = {tok::greater,
-                                                           tok::greater,
-                                                           tok::greater};
-    static const tok::TokenKind JavaRightLogicalShiftAssign[] = {tok::greater,
-                                                                 tok::greater,
-                                                                 tok::greaterequal};
-    if (tryMergeTokens(JavaRightLogicalShift, TT_BinaryOperator))
-      return;
+    static const tok::TokenKind JavaRightLogicalShiftAssign[] = {
+        tok::greater, tok::greater, tok::greaterequal};
     if (tryMergeTokens(JavaRightLogicalShiftAssign, TT_BinaryOperator))
       return;
   }
@@ -162,9 +159,8 @@ bool FormatTokenLexer::tryMergeTokens(ArrayRef<tok::TokenKind> Kinds,
     return false;
   unsigned AddLength = 0;
   for (unsigned i = 1; i < Kinds.size(); ++i) {
-    if (!First[i]->is(Kinds[i]) ||
-        First[i]->WhitespaceRange.getBegin() !=
-            First[i]->WhitespaceRange.getEnd())
+    if (!First[i]->is(Kinds[i]) || First[i]->WhitespaceRange.getBegin() !=
+                                       First[i]->WhitespaceRange.getEnd())
       return false;
     AddLength += First[i]->TokenText.size();
   }
@@ -335,6 +331,27 @@ void FormatTokenLexer::handleTemplateStrings() {
                            ? Lex->getSourceLocation(Offset + 1)
                            : SourceMgr.getLocForEndOfFile(ID);
   resetLexer(SourceMgr.getFileOffset(loc));
+}
+
+void FormatTokenLexer::tryParsePythonComment() {
+  FormatToken *HashToken = Tokens.back();
+  if (!HashToken->isOneOf(tok::hash, tok::hashhash))
+    return;
+  // Turn the remainder of this line into a comment.
+  const char *CommentBegin =
+      Lex->getBufferLocation() - HashToken->TokenText.size(); // at "#"
+  size_t From = CommentBegin - Lex->getBuffer().begin();
+  size_t To = Lex->getBuffer().find_first_of('\n', From);
+  if (To == StringRef::npos)
+    To = Lex->getBuffer().size();
+  size_t Len = To - From;
+  HashToken->Type = TT_LineComment;
+  HashToken->Tok.setKind(tok::comment);
+  HashToken->TokenText = Lex->getBuffer().substr(From, Len);
+  SourceLocation Loc = To < Lex->getBuffer().size()
+                           ? Lex->getSourceLocation(CommentBegin + Len)
+                           : SourceMgr.getLocForEndOfFile(ID);
+  resetLexer(SourceMgr.getFileOffset(Loc));
 }
 
 bool FormatTokenLexer::tryMerge_TMacro() {
@@ -561,13 +578,21 @@ FormatToken *FormatTokenLexer::getNextToken() {
   // take them into account as whitespace - this pattern is quite frequent
   // in macro definitions.
   // FIXME: Add a more explicit test.
-  while (FormatTok->TokenText.size() > 1 && FormatTok->TokenText[0] == '\\' &&
-         FormatTok->TokenText[1] == '\n') {
+  while (FormatTok->TokenText.size() > 1 && FormatTok->TokenText[0] == '\\') {
+    unsigned SkippedWhitespace = 0;
+    if (FormatTok->TokenText.size() > 2 &&
+        (FormatTok->TokenText[1] == '\r' && FormatTok->TokenText[2] == '\n'))
+      SkippedWhitespace = 3;
+    else if (FormatTok->TokenText[1] == '\n')
+      SkippedWhitespace = 2;
+    else
+      break;
+
     ++FormatTok->NewlinesBefore;
-    WhitespaceLength += 2;
-    FormatTok->LastNewlineOffset = 2;
+    WhitespaceLength += SkippedWhitespace;
+    FormatTok->LastNewlineOffset = SkippedWhitespace;
     Column = 0;
-    FormatTok->TokenText = FormatTok->TokenText.substr(2);
+    FormatTok->TokenText = FormatTok->TokenText.substr(SkippedWhitespace);
   }
 
   FormatTok->WhitespaceRange = SourceRange(
@@ -633,12 +658,12 @@ FormatToken *FormatTokenLexer::getNextToken() {
   }
 
   if (Style.isCpp()) {
+    auto it = Macros.find(FormatTok->Tok.getIdentifierInfo());
     if (!(Tokens.size() > 0 && Tokens.back()->Tok.getIdentifierInfo() &&
           Tokens.back()->Tok.getIdentifierInfo()->getPPKeywordID() ==
               tok::pp_define) &&
-        std::find(ForEachMacros.begin(), ForEachMacros.end(),
-                  FormatTok->Tok.getIdentifierInfo()) != ForEachMacros.end()) {
-      FormatTok->Type = TT_ForEachMacro;
+        it != Macros.end()) {
+      FormatTok->Type = it->second;
     } else if (FormatTok->is(tok::identifier)) {
       if (MacroBlockBeginRegex.match(Text)) {
         FormatTok->Type = TT_MacroBlockBegin;
@@ -667,7 +692,9 @@ void FormatTokenLexer::readRawToken(FormatToken &Tok) {
     }
   }
 
-  if (Style.Language == FormatStyle::LK_JavaScript &&
+  if ((Style.Language == FormatStyle::LK_JavaScript ||
+       Style.Language == FormatStyle::LK_Proto ||
+       Style.Language == FormatStyle::LK_TextProto) &&
       Tok.is(tok::char_constant)) {
     Tok.Tok.setKind(tok::string_literal);
   }

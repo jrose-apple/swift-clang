@@ -15,6 +15,7 @@
 #include "clang/Tooling/Refactor/RenamedSymbol.h"
 #include "clang/Tooling/Refactor/SymbolName.h"
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/Support/Mutex.h"
 
 namespace clang {
 namespace tooling {
@@ -40,13 +41,18 @@ struct IndexedSymbol {
   std::vector<IndexedOccurrence> IndexedOccurrences;
   /// Whether this symbol is an Objective-C selector.
   bool IsObjCSelector;
+  /// If true, indexed file renamer will look for matching textual occurrences
+  /// in string literal tokens.
+  bool SearchForStringLiteralOccurrences;
 
   IndexedSymbol(OldSymbolName Name,
                 std::vector<IndexedOccurrence> IndexedOccurrences,
-                bool IsObjCSelector)
+                bool IsObjCSelector,
+                bool SearchForStringLiteralOccurrences = false)
       : Name(std::move(Name)),
         IndexedOccurrences(std::move(IndexedOccurrences)),
-        IsObjCSelector(IsObjCSelector) {}
+        IsObjCSelector(IsObjCSelector),
+        SearchForStringLiteralOccurrences(SearchForStringLiteralOccurrences) {}
   IndexedSymbol(IndexedSymbol &&Other) = default;
   IndexedSymbol &operator=(IndexedSymbol &&Other) = default;
 };
@@ -60,16 +66,37 @@ public:
                                 const LangOptions &LangOpts) = 0;
 };
 
+/// Guards against thread unsafe parts of ClangTool::run.
+class IndexedFileRenamerLock {
+  llvm::sys::Mutex &Lock;
+  bool IsUnlocked = false;
+
+public:
+  IndexedFileRenamerLock(llvm::sys::Mutex &Lock) : Lock(Lock) { Lock.lock(); }
+
+  void unlock() {
+    Lock.unlock();
+    IsUnlocked = true;
+  }
+
+  ~IndexedFileRenamerLock() {
+    if (!IsUnlocked)
+      Lock.unlock();
+  }
+};
+
 /// Finds the renamed \c SymbolOccurrences in an already indexed files.
 class IndexedFileOccurrenceProducer final : public PreprocessorFrontendAction {
   bool IsMultiPiece;
   ArrayRef<IndexedSymbol> Symbols;
   IndexedFileOccurrenceConsumer &Consumer;
+  IndexedFileRenamerLock &Lock;
   const RefactoringOptionSet *Options;
 
 public:
   IndexedFileOccurrenceProducer(ArrayRef<IndexedSymbol> Symbols,
                                 IndexedFileOccurrenceConsumer &Consumer,
+                                IndexedFileRenamerLock &Lock,
                                 const RefactoringOptionSet *Options = nullptr);
 
 private:

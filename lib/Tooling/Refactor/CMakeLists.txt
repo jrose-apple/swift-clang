@@ -37,8 +37,13 @@ add_clang_library(clangToolingRefactor
   clangASTMatchers
   clangBasic
   clangEdit
+  clangFrontend
   clangIndex
   clangLex
   clangToolingCore
   clangRewrite
   )
+
+if(CMAKE_SYSTEM_NAME STREQUAL Windows)
+  set_source_files_properties(Extract.cpp PROPERTIES COMPILE_FLAGS /bigobj)
+endif()

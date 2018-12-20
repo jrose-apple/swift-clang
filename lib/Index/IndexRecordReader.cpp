@@ -306,7 +306,8 @@ public:
     }
     case REC_DECLOFFSETS_BLOCK_ID:
       assert(RecID == REC_DECLOFFSETS);
-      Reader.setDeclOffsets(makeArrayRef((uint32_t*)Blob.data(), Record[0]));
+      Reader.setDeclOffsets(makeArrayRef((const uint32_t*)Blob.data(),
+                            Record[0]));
       break;
 
     case REC_DECLS_BLOCK_ID:
@@ -350,6 +351,11 @@ IndexRecordReader::createWithBuffer(std::unique_ptr<llvm::MemoryBuffer> Buffer,
   auto &Impl = Reader->Impl;
   Impl.Buffer = std::move(Buffer);
   llvm::BitstreamCursor Stream(*Impl.Buffer);
+
+  if (Stream.AtEndOfStream()) {
+    Error = "empty file";
+    return nullptr;
+  }
 
   // Sniff for the signature.
   if (Stream.Read(8) != 'I' ||

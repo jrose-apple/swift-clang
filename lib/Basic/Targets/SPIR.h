@@ -27,6 +27,7 @@ static const unsigned SPIRAddrSpaceMap[] = {
     1, // opencl_global
     3, // opencl_local
     2, // opencl_constant
+    0, // opencl_private
     4, // opencl_generic
     0, // cuda_device
     0, // cuda_constant
@@ -42,9 +43,11 @@ public:
     assert(getTriple().getEnvironment() == llvm::Triple::UnknownEnvironment &&
            "SPIR target must use unknown environment type");
     TLSSupported = false;
+    VLASupported = false;
     LongWidth = LongAlign = 64;
     AddrSpaceMap = &SPIRAddrSpaceMap;
     UseAddrSpaceMapMangling = true;
+    HasLegalHalfType = true;
     // Define available target features
     // These must be defined in sorted order!
     NoAsmVariants = true;
@@ -56,6 +59,10 @@ public:
   bool hasFeature(StringRef Feature) const override {
     return Feature == "spir";
   }
+
+  // SPIR supports the half type and the only llvm intrinsic allowed in SPIR is
+  // memcpy as per section 3 of the SPIR spec.
+  bool useFP16ConversionIntrinsics() const override { return false; }
 
   ArrayRef<Builtin::Info> getTargetBuiltins() const override { return None; }
 

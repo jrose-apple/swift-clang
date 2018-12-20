@@ -14,39 +14,13 @@
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/Support/Chrono.h"
 #include <functional>
 #include <memory>
 #include <string>
-#include <vector>
 
 namespace clang {
 namespace index {
-
-class AbstractDirectoryWatcher {
-public:
-  enum class EventKind {
-    /// A file was added.
-    Added,
-    /// A file was removed.
-    Removed,
-    /// A file was modified.
-    Modified,
-    /// The watched directory got deleted. No more events will follow.
-    DirectoryDeleted,
-  };
-
-  struct Event {
-    EventKind Kind;
-    std::string Filename;
-    timespec ModTime;
-  };
-
-  typedef std::function<void(ArrayRef<Event> Events, bool isInitial)> EventReceiver;
-  typedef std::unique_ptr<AbstractDirectoryWatcher>(CreateFnTy)
-    (StringRef Path, EventReceiver Receiver, bool waitInitialSync, std::string &Error);
-
-  virtual ~AbstractDirectoryWatcher() {}
-};
 
 class IndexDataStore {
 public:
@@ -71,7 +45,7 @@ public:
   struct UnitEvent {
     UnitEventKind Kind;
     StringRef UnitName;
-    timespec ModTime;
+    llvm::sys::TimePoint<> ModTime;
   };
   struct UnitEventNotification {
     bool IsInitial;
@@ -81,8 +55,7 @@ public:
 
   void setUnitEventHandler(UnitEventHandler Handler);
   /// \returns true if an error occurred.
-  bool startEventListening(llvm::function_ref<AbstractDirectoryWatcher::CreateFnTy> createFn,
-                           bool waitInitialSync, std::string &Error);
+  bool startEventListening(bool waitInitialSync, std::string &Error);
   void stopEventListening();
 
   void discardUnit(StringRef UnitName);

@@ -1,4 +1,6 @@
-// RUN: %clang_cc1 -verify -fopenmp %s
+// RUN: %clang_cc1 -verify -fopenmp %s -Wno-openmp-target
+
+// RUN: %clang_cc1 -verify -fopenmp-simd %s -Wno-openmp-target
 
 void foo() {
 }
@@ -25,7 +27,7 @@ const S2 b;
 const S2 ba[5];
 class S3 {
   int a;
-  S3 &operator=(const S3 &s3); // expected-note 2 {{implicitly declared private here}}
+  S3 &operator=(const S3 &s3); // expected-note {{implicitly declared private here}}
 
 public:
   S3() : a(0) {}
@@ -52,7 +54,7 @@ public:
 };
 class S6 {
   int a;
-  S6() : a(0) {}
+  S6() : a(0) {} // expected-note {{implicitly declared private here}}
 
 public:
   S6(const S6 &s6) : a(s6.a) {}
@@ -219,7 +221,7 @@ int main(int argc, char **argv) {
     foo();
 #pragma omp target
 #pragma omp teams
-#pragma omp distribute parallel for simd lastprivate(a, b, c, d, f) // expected-error {{lastprivate variable with incomplete type 'S1'}} expected-error 3 {{shared variable cannot be lastprivate}}
+#pragma omp distribute parallel for simd lastprivate(a, b, c, d, f) // expected-error {{lastprivate variable with incomplete type 'S1'}} expected-error 3 {{shared variable cannot be lastprivate}} expected-error {{incomplete type 'S1' where a complete type is required}}
   for (i = 0; i < argc; ++i)
     foo();
 #pragma omp target
@@ -313,14 +315,16 @@ int main(int argc, char **argv) {
 #pragma omp distribute parallel for simd lastprivate(j)
   for (i = 0; i < argc; ++i)
     foo();
+// expected-error@+3 {{firstprivate variable cannot be lastprivate}} expected-note@+3 {{defined as firstprivate}}
 #pragma omp target
 #pragma omp teams
-#pragma omp distribute parallel for simd firstprivate(m) lastprivate(m) // expected-error {{'operator=' is a private member of 'S3'}}
+#pragma omp distribute parallel for simd firstprivate(m) lastprivate(m)
   for (i = 0; i < argc; ++i)
     foo();
+// expected-error@+3 {{lastprivate variable cannot be firstprivate}} expected-note@+3 {{defined as lastprivate}}
 #pragma omp target
 #pragma omp teams
-#pragma omp distribute parallel for simd lastprivate(n) firstprivate(n) // OK
+#pragma omp distribute parallel for simd lastprivate(n) firstprivate(n) // expected-error {{calling a private constructor of class 'S6'}}
   for (i = 0; i < argc; ++i)
     foo();
   static int si;

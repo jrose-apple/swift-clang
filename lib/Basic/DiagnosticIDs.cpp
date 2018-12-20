@@ -88,6 +88,7 @@ VALIDATE_DIAG_SIZE(AST)
 VALIDATE_DIAG_SIZE(COMMENT)
 VALIDATE_DIAG_SIZE(SEMA)
 VALIDATE_DIAG_SIZE(ANALYSIS)
+VALIDATE_DIAG_SIZE(REFACTORING)
 #undef VALIDATE_DIAG_SIZE
 #undef STRINGIFY_NAME
 
@@ -109,6 +110,7 @@ static const StaticDiagInfoRec StaticDiagInfo[] = {
 #include "clang/Basic/DiagnosticParseKinds.inc"
 #include "clang/Basic/DiagnosticASTKinds.inc"
 #include "clang/Basic/DiagnosticCommentKinds.inc"
+#include "clang/Basic/DiagnosticCrossTUKinds.inc"
 #include "clang/Basic/DiagnosticSemaKinds.inc"
 #include "clang/Basic/DiagnosticAnalysisKinds.inc"
 #include "clang/Basic/DiagnosticRefactoringKinds.inc"
@@ -147,7 +149,8 @@ CATEGORY(LEX, SERIALIZATION)
 CATEGORY(PARSE, LEX)
 CATEGORY(AST, PARSE)
 CATEGORY(COMMENT, AST)
-CATEGORY(SEMA, COMMENT)
+CATEGORY(CROSSTU, COMMENT)
+CATEGORY(SEMA, CROSSTU)
 CATEGORY(ANALYSIS, SEMA)
 CATEGORY(REFACTORING, ANALYSIS)
 #undef CATEGORY
@@ -337,7 +340,7 @@ bool DiagnosticIDs::isBuiltinWarningOrExtension(unsigned DiagID) {
          getBuiltinDiagClass(DiagID) != CLASS_ERROR;
 }
 
-/// \brief Determine whether the given built-in diagnostic ID is a
+/// Determine whether the given built-in diagnostic ID is a
 /// Note.
 bool DiagnosticIDs::isBuiltinNote(unsigned DiagID) {
   return DiagID < diag::DIAG_UPPER_LIMIT &&
@@ -409,7 +412,7 @@ DiagnosticIDs::getDiagnosticLevel(unsigned DiagID, SourceLocation Loc,
   return toLevel(getDiagnosticSeverity(DiagID, Loc, Diag));
 }
 
-/// \brief Based on the way the client configured the Diagnostic
+/// Based on the way the client configured the Diagnostic
 /// object, classify the specified diagnostic ID into a Level, consumable by
 /// the DiagnosticClient.
 ///
@@ -467,7 +470,7 @@ DiagnosticIDs::getDiagnosticSeverity(unsigned DiagID, SourceLocation Loc,
       Result = diag::Severity::Error;
   }
 
-  // If -Wfatal-errors is enabled, map errors to fatal unless explicity
+  // If -Wfatal-errors is enabled, map errors to fatal unless explicitly
   // disabled.
   if (Result == diag::Severity::Error) {
     if (State->ErrorsAsFatal && !Mapping.hasNoErrorAsFatal())
@@ -580,7 +583,7 @@ DiagnosticIDs::getDiagnosticsInGroup(diag::Flavor Flavor, StringRef Group,
 }
 
 void DiagnosticIDs::getAllDiagnostics(diag::Flavor Flavor,
-                                     SmallVectorImpl<diag::kind> &Diags) const {
+                                      std::vector<diag::kind> &Diags) {
   for (unsigned i = 0; i != StaticDiagInfoSize; ++i)
     if (StaticDiagInfo[i].getFlavor() == Flavor)
       Diags.push_back(StaticDiagInfo[i].DiagID);
@@ -682,7 +685,7 @@ bool DiagnosticIDs::ProcessDiag(DiagnosticsEngine &Diag) const {
       ++Diag.NumErrors;
     }
 
-    // If we've emitted a lot of errors, emit a fatal error instead of it to 
+    // If we've emitted a lot of errors, emit a fatal error instead of it to
     // stop a flood of bogus errors.
     if (Diag.ErrorLimit && Diag.NumErrors > Diag.ErrorLimit &&
         DiagLevel == DiagnosticIDs::Error) {

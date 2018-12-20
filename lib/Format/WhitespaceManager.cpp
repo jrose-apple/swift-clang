@@ -8,7 +8,7 @@
 //===----------------------------------------------------------------------===//
 ///
 /// \file
-/// \brief This file implements WhitespaceManager class.
+/// This file implements WhitespaceManager class.
 ///
 //===----------------------------------------------------------------------===//
 
@@ -67,6 +67,11 @@ void WhitespaceManager::addUntouchableToken(const FormatToken &Tok,
                            /*IsInsideToken=*/false));
 }
 
+llvm::Error
+WhitespaceManager::addReplacement(const tooling::Replacement &Replacement) {
+  return Replaces.add(Replacement);
+}
+
 void WhitespaceManager::replaceWhitespaceInToken(
     const FormatToken &Tok, unsigned Offset, unsigned ReplaceChars,
     StringRef PreviousPostfix, StringRef CurrentPrefix, bool InPPDirective,
@@ -85,7 +90,7 @@ const tooling::Replacements &WhitespaceManager::generateReplacements() {
   if (Changes.empty())
     return Replaces;
 
-  std::sort(Changes.begin(), Changes.end(), Change::IsBeforeInFile(SourceMgr));
+  llvm::sort(Changes, Change::IsBeforeInFile(SourceMgr));
   calculateLineBreakInformation();
   alignConsecutiveDeclarations();
   alignConsecutiveAssignments();
@@ -166,15 +171,15 @@ void WhitespaceManager::calculateLineBreakInformation() {
         // BreakableLineCommentSection does comment reflow changes and here is
         // the aligning of trailing comments. Consider the case where we reflow
         // the second line up in this example:
-        // 
+        //
         // // line 1
         // // line 2
-        // 
+        //
         // That amounts to 2 changes by BreakableLineCommentSection:
         //  - the first, delimited by (), for the whitespace between the tokens,
         //  - and second, delimited by [], for the whitespace at the beginning
         //  of the second token:
-        // 
+        //
         // // line 1(
         // )[// ]line 2
         //
@@ -250,8 +255,14 @@ AlignTokenSequence(unsigned Start, unsigned End, unsigned Column, F &&Matches,
             Changes[ScopeStack.back()].indentAndNestingLevel())
       ScopeStack.pop_back();
 
+    // Compare current token to previous non-comment token to ensure whether
+    // it is in a deeper scope or not.
+    unsigned PreviousNonComment = i - 1;
+    while (PreviousNonComment > Start &&
+           Changes[PreviousNonComment].Tok->is(tok::comment))
+      PreviousNonComment--;
     if (i != Start && Changes[i].indentAndNestingLevel() >
-                          Changes[i - 1].indentAndNestingLevel())
+                          Changes[PreviousNonComment].indentAndNestingLevel())
       ScopeStack.push_back(i);
 
     bool InsideNestedScope = ScopeStack.size() != 0;
@@ -622,8 +633,7 @@ void WhitespaceManager::generateChanges() {
   }
 }
 
-void WhitespaceManager::storeReplacement(SourceRange Range,
-                                         StringRef Text) {
+void WhitespaceManager::storeReplacement(SourceRange Range, StringRef Text) {
   unsigned WhitespaceLength = SourceMgr.getFileOffset(Range.getEnd()) -
                               SourceMgr.getFileOffset(Range.getBegin());
   // Don't create a replacement, if it does not change anything.
@@ -646,10 +656,9 @@ void WhitespaceManager::appendNewlineText(std::string &Text,
     Text.append(UseCRLF ? "\r\n" : "\n");
 }
 
-void WhitespaceManager::appendEscapedNewlineText(std::string &Text,
-                                                 unsigned Newlines,
-                                                 unsigned PreviousEndOfTokenColumn,
-                                                 unsigned EscapedNewlineColumn) {
+void WhitespaceManager::appendEscapedNewlineText(
+    std::string &Text, unsigned Newlines, unsigned PreviousEndOfTokenColumn,
+    unsigned EscapedNewlineColumn) {
   if (Newlines > 0) {
     unsigned Spaces =
         std::max<int>(1, EscapedNewlineColumn - PreviousEndOfTokenColumn - 1);

@@ -9,6 +9,7 @@
 
 #include "clang-c/Index.h"
 #include "clang-c/Refactor.h"
+#include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Path.h"
@@ -467,15 +468,17 @@ public:
     unsigned NumDiagnostics = clang_getNumDiagnostics(ClangTU);
     for (unsigned i = 0; i < NumDiagnostics; ++i) {
       auto Diag = clang_getDiagnostic(ClangTU, i);
-      DEBUG(llvm::dbgs() << clang_getCString(clang_formatDiagnostic(
-          Diag, clang_defaultDiagnosticDisplayOptions())) << "\n");
+      LLVM_DEBUG(llvm::dbgs()
+                 << clang_getCString(clang_formatDiagnostic(
+                        Diag, clang_defaultDiagnosticDisplayOptions()))
+                 << "\n");
       clang_disposeDiagnostic(Diag);
     }
   }
   bool ReparseTU(unsigned num_unsaved_files, CXUnsavedFile* unsaved_files) {
     if (clang_reparseTranslationUnit(ClangTU, num_unsaved_files, unsaved_files,
                                      clang_defaultReparseOptions(ClangTU))) {
-      DEBUG(llvm::dbgs() << "Reparse failed\n");
+      LLVM_DEBUG(llvm::dbgs() << "Reparse failed\n");
       return false;
     }
     DisplayDiagnostics();
@@ -483,6 +486,21 @@ public:
   }
 };
 
+TEST_F(LibclangReparseTest, FileName) {
+  std::string CppName = "main.cpp";
+  WriteFile(CppName, "int main() {}");
+  ClangTU = clang_parseTranslationUnit(Index, CppName.c_str(), nullptr, 0,
+                                       nullptr, 0, TUFlags);
+  CXFile cxf = clang_getFile(ClangTU, CppName.c_str());
+
+  CXString cxname = clang_getFileName(cxf);
+  ASSERT_STREQ(clang_getCString(cxname), CppName.c_str());
+  clang_disposeString(cxname);
+
+  cxname = clang_File_tryGetRealPathName(cxf);
+  ASSERT_TRUE(llvm::StringRef(clang_getCString(cxname)).endswith("main.cpp"));
+  clang_disposeString(cxname);
+}
 
 TEST_F(LibclangReparseTest, Reparse) {
   const char *HeaderTop = "#ifndef H\n#define H\nstruct Foo { int bar;";
@@ -640,4 +658,98 @@ TEST_F(LibclangParseTest, RefactoringRenameIndexedUnsavedFiles) {
   EXPECT_EQ(UnsavedFileOccurrences.Occurrences[1].NamePieces[0].Begin.Line, 2u);
   EXPECT_EQ(UnsavedFileOccurrences.Occurrences[1].NamePieces[0].Begin.Column,
             1u);
+}
+
+class LibclangPrintingPolicyTest : public LibclangParseTest {
+public:
+  CXPrintingPolicy Policy = nullptr;
+
+  void SetUp() override {
+    LibclangParseTest::SetUp();
+    std::string File = "file.cpp";
+    WriteFile(File, "int i;\n");
+    ClangTU = clang_parseTranslationUnit(Index, File.c_str(), nullptr, 0,
+                                         nullptr, 0, TUFlags);
+    CXCursor TUCursor = clang_getTranslationUnitCursor(ClangTU);
+    Policy = clang_getCursorPrintingPolicy(TUCursor);
+  }
+  void TearDown() override {
+    clang_PrintingPolicy_dispose(Policy);
+    LibclangParseTest::TearDown();
+  }
+};
+
+TEST_F(LibclangPrintingPolicyTest, SetAndGetProperties) {
+  for (unsigned Value = 0; Value < 2; ++Value) {
+    for (int I = 0; I < CXPrintingPolicy_LastProperty; ++I) {
+      auto Property = static_cast<enum CXPrintingPolicyProperty>(I);
+
+      clang_PrintingPolicy_setProperty(Policy, Property, Value);
+      EXPECT_EQ(Value, clang_PrintingPolicy_getProperty(Policy, Property));
+    }
+  }
+}
+
+class LibclangSerializationTest : public LibclangParseTest {
+public:
+  bool SaveAndLoadTU(const std::string &Filename) {
+    unsigned options = clang_defaultSaveOptions(ClangTU);
+    if (clang_saveTranslationUnit(ClangTU, Filename.c_str(), options) !=
+        CXSaveError_None) {
+      LLVM_DEBUG(llvm::dbgs() << "Saving failed\n");
+      return false;
+    }
+
+    clang_disposeTranslationUnit(ClangTU);
+
+    ClangTU = clang_createTranslationUnit(Index, Filename.c_str());
+
+    if (!ClangTU) {
+      LLVM_DEBUG(llvm::dbgs() << "Loading failed\n");
+      return false;
+    }
+
+    return true;
+  }
+};
+
+TEST_F(LibclangSerializationTest, TokenKindsAreCorrectAfterLoading) {
+  // Ensure that "class" is recognized as a keyword token after serializing
+  // and reloading the AST, as it is not a keyword for the default LangOptions.
+  std::string HeaderName = "test.h";
+  WriteFile(HeaderName, "enum class Something {};");
+
+  const char *Argv[] = {"-xc++-header", "-std=c++11"};
+
+  ClangTU = clang_parseTranslationUnit(Index, HeaderName.c_str(), Argv,
+                                       sizeof(Argv) / sizeof(Argv[0]), nullptr,
+                                       0, TUFlags);
+
+  auto CheckTokenKinds = [=]() {
+    CXSourceRange Range =
+        clang_getCursorExtent(clang_getTranslationUnitCursor(ClangTU));
+
+    CXToken *Tokens;
+    unsigned int NumTokens;
+    clang_tokenize(ClangTU, Range, &Tokens, &NumTokens);
+
+    ASSERT_EQ(6u, NumTokens);
+    EXPECT_EQ(CXToken_Keyword, clang_getTokenKind(Tokens[0]));
+    EXPECT_EQ(CXToken_Keyword, clang_getTokenKind(Tokens[1]));
+    EXPECT_EQ(CXToken_Identifier, clang_getTokenKind(Tokens[2]));
+    EXPECT_EQ(CXToken_Punctuation, clang_getTokenKind(Tokens[3]));
+    EXPECT_EQ(CXToken_Punctuation, clang_getTokenKind(Tokens[4]));
+    EXPECT_EQ(CXToken_Punctuation, clang_getTokenKind(Tokens[5]));
+
+    clang_disposeTokens(ClangTU, Tokens, NumTokens);
+  };
+
+  CheckTokenKinds();
+
+  std::string ASTName = "test.ast";
+  WriteFile(ASTName, "");
+
+  ASSERT_TRUE(SaveAndLoadTU(ASTName));
+
+  CheckTokenKinds();
 }

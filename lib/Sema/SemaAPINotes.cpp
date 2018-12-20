@@ -21,14 +21,21 @@ namespace {
     IsNotActive,
     IsActive
   };
+  enum IsReplacement_t : bool {
+    IsNotReplacement,
+    IsReplacement
+  };
 
   struct VersionedInfoMetadata {
     /// An empty version refers to unversioned metadata.
     VersionTuple Version;
-    bool IsActive;
+    unsigned IsActive: 1;
+    unsigned IsReplacement: 1;
 
-    VersionedInfoMetadata(VersionTuple version, IsActive_t active)
-        : Version(version), IsActive(active == IsActive_t::IsActive) {}
+    VersionedInfoMetadata(VersionTuple version, IsActive_t active,
+                          IsReplacement_t replacement)
+      : Version(version), IsActive(active == IsActive_t::IsActive),
+        IsReplacement(replacement == IsReplacement_t::IsReplacement) {}
   };
 } // end anonymous namespace
 
@@ -65,10 +72,10 @@ static void applyNullability(Sema &S, Decl *decl, NullabilityKind nullability,
 
   // Check the nullability specifier on this type.
   QualType origType = type;
-  S.checkNullabilityTypeSpecifier(type, nullability, decl->getLocation(),
-                                  /*isContextSensitive=*/false,
-                                  isa<ParmVarDecl>(decl), /*implicit=*/true,
-                                  /*overrideExisting=*/true);
+  S.checkImplicitNullabilityTypeSpecifier(type, nullability,
+                                          decl->getLocation(),
+                                          isa<ParmVarDecl>(decl),
+                                          /*overrideExisting=*/true);
   if (type.getTypePtr() == origType.getTypePtr())
     return;
 
@@ -141,18 +148,16 @@ namespace {
          Sema &S, Decl *D, bool shouldAddAttribute,
          VersionedInfoMetadata metadata,
          llvm::function_ref<A *()> createAttr,
-         llvm::function_ref<specific_attr_iterator<A>(Decl*)> getExistingAttr) {
+         llvm::function_ref<Decl::attr_iterator(const Decl*)> getExistingAttr) {
     if (metadata.IsActive) {
-      auto end = D->specific_attr_end<A>();
       auto existing = getExistingAttr(D);
-      if (existing != end) {
+      if (existing != D->attr_end()) {
         // Remove the existing attribute, and treat it as a superseded
         // non-versioned attribute.
-        auto *versioned =
-            SwiftVersionedAttr::CreateImplicit(S.Context, clang::VersionTuple(),
-                                               *existing);
+        auto *versioned = SwiftVersionedAttr::CreateImplicit(
+            S.Context, metadata.Version, *existing, /*IsReplacedByActive*/true);
 
-        D->getAttrs().erase(existing.getCurrent());
+        D->getAttrs().erase(existing);
         D->addAttr(versioned);
       }
 
@@ -166,19 +171,18 @@ namespace {
     } else {
       if (shouldAddAttribute) {
         if (auto attr = createAttr()) {
-          auto *versioned =
-              SwiftVersionedAttr::CreateImplicit(S.Context, metadata.Version, 
-                                                 attr);
+          auto *versioned = SwiftVersionedAttr::CreateImplicit(
+              S.Context, metadata.Version, attr,
+              /*IsReplacedByActive*/metadata.IsReplacement);
           D->addAttr(versioned);
         }
       } else {
         // FIXME: This isn't preserving enough information for things like
         // availability, where we're trying to remove a /specific/ kind of
         // attribute.
-        auto *versioned =
-            SwiftVersionedRemovalAttr::CreateImplicit(S.Context, 
-                                                      metadata.Version,
-                                                      AttrKindFor<A>::value);
+        auto *versioned = SwiftVersionedRemovalAttr::CreateImplicit(
+            S.Context,  metadata.Version, AttrKindFor<A>::value,
+            /*IsReplacedByActive*/metadata.IsReplacement);
         D->addAttr(versioned);
       }
     }
@@ -190,9 +194,64 @@ namespace {
          VersionedInfoMetadata metadata,
          llvm::function_ref<A *()> createAttr) {
     handleAPINotedAttribute<A>(S, D, shouldAddAttribute, metadata, createAttr,
-    [](Decl *decl) {
-        return decl->specific_attr_begin<A>();
+                               [](const Decl *decl) {
+      return llvm::find_if(decl->attrs(), [](const Attr *next) {
+        return isa<A>(next);
+      });
     });
+  }
+}
+
+template <typename A = CFReturnsRetainedAttr>
+static void handleAPINotedRetainCountAttribute(Sema &S, Decl *D,
+                                               bool shouldAddAttribute,
+                                               VersionedInfoMetadata metadata) {
+  // The template argument has a default to make the "removal" case more
+  // concise; it doesn't matter /which/ attribute is being removed.
+  handleAPINotedAttribute<A>(S, D, shouldAddAttribute, metadata, [&] {
+    return new (S.Context) A(SourceRange(), S.Context, /*SpellingIndex*/0);
+  }, [](const Decl *D) -> Decl::attr_iterator {
+    return llvm::find_if(D->attrs(), [](const Attr *next) -> bool {
+      return isa<CFReturnsRetainedAttr>(next) ||
+             isa<CFReturnsNotRetainedAttr>(next) ||
+             isa<NSReturnsRetainedAttr>(next) ||
+             isa<NSReturnsNotRetainedAttr>(next) ||
+             isa<CFAuditedTransferAttr>(next);
+    });
+  });
+}
+
+static void handleAPINotedRetainCountConvention(
+    Sema &S, Decl *D, VersionedInfoMetadata metadata,
+    Optional<api_notes::RetainCountConventionKind> convention) {
+  if (!convention)
+    return;
+  switch (convention.getValue()) {
+  case api_notes::RetainCountConventionKind::None:
+    if (isa<FunctionDecl>(D)) {
+      handleAPINotedRetainCountAttribute<CFUnknownTransferAttr>(
+          S, D, /*shouldAddAttribute*/true, metadata);
+    } else {
+      handleAPINotedRetainCountAttribute(S, D, /*shouldAddAttribute*/false,
+                                         metadata);
+    }
+    break;
+  case api_notes::RetainCountConventionKind::CFReturnsRetained:
+    handleAPINotedRetainCountAttribute<CFReturnsRetainedAttr>(
+        S, D, /*shouldAddAttribute*/true, metadata);
+    break;
+  case api_notes::RetainCountConventionKind::CFReturnsNotRetained:
+    handleAPINotedRetainCountAttribute<CFReturnsNotRetainedAttr>(
+        S, D, /*shouldAddAttribute*/true, metadata);
+    break;
+  case api_notes::RetainCountConventionKind::NSReturnsRetained:
+    handleAPINotedRetainCountAttribute<NSReturnsRetainedAttr>(
+        S, D, /*shouldAddAttribute*/true, metadata);
+    break;
+  case api_notes::RetainCountConventionKind::NSReturnsNotRetained:
+    handleAPINotedRetainCountAttribute<NSReturnsNotRetainedAttr>(
+        S, D, /*shouldAddAttribute*/true, metadata);
+    break;
   }
 }
 
@@ -203,38 +262,36 @@ static void ProcessAPINotes(Sema &S, Decl *D,
   if (info.Unavailable) {
     handleAPINotedAttribute<UnavailableAttr>(S, D, true, metadata,
       [&] {
-        return UnavailableAttr::CreateImplicit(S.Context,
+        return new (S.Context) UnavailableAttr(SourceRange(), S.Context,
                                                CopyString(S.Context,
-                                                          info.UnavailableMsg));
+                                                          info.UnavailableMsg),
+                                               /*SpellingIndex*/0);
     });
   }
 
   if (info.UnavailableInSwift) {
     handleAPINotedAttribute<AvailabilityAttr>(S, D, true, metadata, [&] {
-      return AvailabilityAttr::CreateImplicit(
-                   S.Context,
-                   &S.Context.Idents.get("swift"),
-                   VersionTuple(),
-                   VersionTuple(),
-                   VersionTuple(),
-                   /*Unavailable=*/true,
-                   CopyString(S.Context, info.UnavailableMsg),
-                   /*Strict=*/false,
-                   /*Replacement=*/StringRef());
+      return new (S.Context) AvailabilityAttr(SourceRange(), S.Context,
+                                              &S.Context.Idents.get("swift"),
+                                              VersionTuple(), VersionTuple(),
+                                              VersionTuple(),
+                                              /*Unavailable=*/true,
+                                              CopyString(S.Context,
+                                                         info.UnavailableMsg),
+                                              /*Strict=*/false,
+                                              /*Replacement=*/StringRef(),
+                                              /*SpellingIndex*/0);
     },
-    [](Decl *decl) {
-      auto existing = decl->specific_attr_begin<AvailabilityAttr>(),
-        end = decl->specific_attr_end<AvailabilityAttr>();
-      while (existing != end) {
-        if (auto platform = (*existing)->getPlatform()) {
-          if (platform->isStr("swift"))
-            break;
-        }
-
-        ++existing;
-      }
-
-      return existing;
+    [](const Decl *decl) {
+      return llvm::find_if(decl->attrs(), [](const Attr *next) -> bool {
+        auto *AA = dyn_cast<AvailabilityAttr>(next);
+        if (!AA)
+          return false;
+        const IdentifierInfo *platform = AA->getPlatform();
+        if (!platform)
+          return false;
+        return platform->isStr("swift");
+      });
     });
   }
 
@@ -242,7 +299,8 @@ static void ProcessAPINotes(Sema &S, Decl *D,
   if (auto swiftPrivate = info.isSwiftPrivate()) {
     handleAPINotedAttribute<SwiftPrivateAttr>(S, D, *swiftPrivate, metadata,
                                               [&] {
-      return SwiftPrivateAttr::CreateImplicit(S.Context);
+      return new (S.Context) SwiftPrivateAttr(SourceRange(), S.Context,
+                                              /*SpellingIndex*/0);
     });
   }
 
@@ -257,9 +315,10 @@ static void ProcessAPINotes(Sema &S, Decl *D,
         return nullptr;
       }
 
-      return SwiftNameAttr::CreateImplicit(S.Context,
+      return new (S.Context) SwiftNameAttr(SourceRange(), S.Context,
                                            CopyString(S.Context,
-                                                      info.SwiftName));
+                                                      info.SwiftName),
+                                           /*SpellingIndex*/0);
     });
   }
 }
@@ -271,9 +330,10 @@ static void ProcessAPINotes(Sema &S, Decl *D,
   if (auto swiftBridge = info.getSwiftBridge()) {
     handleAPINotedAttribute<SwiftBridgeAttr>(S, D, !swiftBridge->empty(),
                                              metadata, [&] {
-      return SwiftBridgeAttr::CreateImplicit(S.Context,
+      return new (S.Context) SwiftBridgeAttr(SourceRange(), S.Context,
                                              CopyString(S.Context,
-                                                        *swiftBridge));
+                                                        *swiftBridge),
+                                             /*SpellingIndex*/0);
     });
   }
 
@@ -281,9 +341,9 @@ static void ProcessAPINotes(Sema &S, Decl *D,
   if (auto nsErrorDomain = info.getNSErrorDomain()) {
     handleAPINotedAttribute<NSErrorDomainAttr>(S, D, !nsErrorDomain->empty(),
                                                metadata, [&] {
-      return NSErrorDomainAttr::CreateImplicit(
-               S.Context,
-               &S.Context.Idents.get(*nsErrorDomain));
+      return new (S.Context) NSErrorDomainAttr(
+          SourceRange(), S.Context, &S.Context.Idents.get(*nsErrorDomain),
+          /*SpellingIndex*/0);
     });
   }
 
@@ -364,9 +424,14 @@ static void ProcessAPINotes(Sema &S, ParmVarDecl *D,
   // noescape
   if (auto noescape = info.isNoEscape()) {
     handleAPINotedAttribute<NoEscapeAttr>(S, D, *noescape, metadata, [&] {
-      return NoEscapeAttr::CreateImplicit(S.Context);
+      return new (S.Context) NoEscapeAttr(SourceRange(), S.Context,
+                                          /*SpellingIndex*/0);
     });
   }
+
+  // Retain count convention
+  handleAPINotedRetainCountConvention(S, D, metadata,
+                                      info.getRetainCountConvention());
 
   // Handle common entity information.
   ProcessAPINotes(S, D, static_cast<const api_notes::VariableInfo &>(info),
@@ -393,7 +458,8 @@ static void ProcessAPINotes(Sema &S, ObjCPropertyDecl *D,
     handleAPINotedAttribute<SwiftImportPropertyAsAccessorsAttr>(S, D,
                                                                 *asAccessors,
                                                                 metadata, [&] {
-      return SwiftImportPropertyAsAccessorsAttr::CreateImplicit(S.Context);
+      return new (S.Context) SwiftImportPropertyAsAccessorsAttr(
+          SourceRange(), S.Context, /*SpellingIndex*/0);
     });
   }
 }
@@ -498,6 +564,10 @@ static void ProcessAPINotes(Sema &S, FunctionOrMethod AnyFunc,
     }
   }
 
+  // Retain count convention
+  handleAPINotedRetainCountConvention(S, D, metadata,
+                                      info.getRetainCountConvention());
+
   // Handle common entity information.
   ProcessAPINotes(S, D, static_cast<const api_notes::CommonEntityInfo &>(info),
                   metadata);
@@ -535,7 +605,9 @@ static void ProcessAPINotes(Sema &S, ObjCMethodDecl *D,
       if (ObjCInterfaceDecl *IFace = D->getClassInterface()) {
         IFace->setHasDesignatedInitializers();
       }
-      return ObjCDesignatedInitializerAttr::CreateImplicit(S.Context);
+      return new (S.Context) ObjCDesignatedInitializerAttr(SourceRange(),
+                                                           S.Context,
+                                                           /*SpellingIndex*/0);
     });
   }
 
@@ -564,14 +636,16 @@ static void ProcessAPINotes(Sema &S, TagDecl *D,
         kind = EnumExtensibilityAttr::Closed;
         break;
       }
-      return EnumExtensibilityAttr::CreateImplicit(S.Context, kind);
+      return new (S.Context) EnumExtensibilityAttr(SourceRange(), S.Context,
+                                                   kind, /*SpellingIndex*/0);
     });
   }
 
   if (auto flagEnum = info.isFlagEnum()) {
     handleAPINotedAttribute<FlagEnumAttr>(S, D, flagEnum.getValue(), metadata,
                                           [&] {
-      return FlagEnumAttr::CreateImplicit(S.Context);
+      return new (S.Context) FlagEnumAttr(SourceRange(), S.Context,
+                                          /*SpellingIndex*/0);
     });
   }
 
@@ -604,10 +678,9 @@ static void ProcessAPINotes(Sema &S, TypedefNameDecl *D,
           kind = SwiftNewtypeAttr::NK_Enum;
           break;
         }
-        return SwiftNewtypeAttr::CreateImplicit(
-                 S.Context,
-                 SwiftNewtypeAttr::GNU_swift_wrapper,
-                 kind);
+        return new (S.Context) SwiftNewtypeAttr(
+            SourceRange(), S.Context, kind,
+            SwiftNewtypeAttr::GNU_swift_wrapper);
     });
   }
 
@@ -633,14 +706,17 @@ static void ProcessAPINotes(Sema &S, ObjCInterfaceDecl *D,
   if (auto asNonGeneric = info.getSwiftImportAsNonGeneric()) {
     handleAPINotedAttribute<SwiftImportAsNonGenericAttr>(S, D, *asNonGeneric,
                                                          metadata, [&] {
-      return SwiftImportAsNonGenericAttr::CreateImplicit(S.Context);
+      return new (S.Context) SwiftImportAsNonGenericAttr(SourceRange(),
+                                                         S.Context,
+                                                         /*SpellingIndex*/0);
     });
   }
 
     if (auto objcMembers = info.getSwiftObjCMembers()) {
     handleAPINotedAttribute<SwiftObjCMembersAttr>(S, D, *objcMembers,
                                                          metadata, [&] {
-      return SwiftObjCMembersAttr::CreateImplicit(S.Context);
+      return new (S.Context) SwiftObjCMembersAttr(SourceRange(), S.Context,
+                                                  /*SpellingIndex*/0);
     });
   }
 
@@ -684,7 +760,8 @@ static void maybeAttachUnversionedSwiftName(
   }
 
   // Then explicitly call that out with a removal attribute.
-  VersionedInfoMetadata DummyFutureMetadata(VersionTuple(), IsNotActive);
+  VersionedInfoMetadata DummyFutureMetadata(SelectedVersion, IsNotActive,
+                                            IsReplacement);
   handleAPINotedAttribute<SwiftNameAttr>(S, D, /*add*/false,
                                          DummyFutureMetadata,
                                          []() -> SwiftNameAttr * {
@@ -709,7 +786,13 @@ static void ProcessVersionedAPINotes(
   for (unsigned i = 0, e = Info.size(); i != e; ++i) {
     std::tie(Version, InfoSlice) = Info[i];
     auto Active = (i == Selected) ? IsActive : IsNotActive;
-    ProcessAPINotes(S, D, InfoSlice, VersionedInfoMetadata(Version, Active));
+    auto Replacement = IsNotReplacement;
+    if (Active == IsNotActive && Version.empty()) {
+      Replacement = IsReplacement;
+      Version = Info[Selected].first;
+    }
+    ProcessAPINotes(S, D, InfoSlice, VersionedInfoMetadata(Version, Active,
+                                                           Replacement));
   }
 }
 

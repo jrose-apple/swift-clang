@@ -12,9 +12,7 @@ add_clang_executable(c-index-test
 
 set(INDEXSTORE_LIB)
 set(CINDEXTEST_LIBS)
-if(APPLE)
-  set(INDEXSTORE_LIB IndexStore)
-endif()
+set(INDEXSTORE_LIB IndexStore)
 
 if(NOT MSVC)
   set_property(
@@ -25,6 +23,7 @@ endif()
 
 if (LLVM_BUILD_STATIC)
   target_link_libraries(c-index-test
+    PRIVATE
     libclang_static
     clangCodeGen
     clangIndex
@@ -32,6 +31,7 @@ if (LLVM_BUILD_STATIC)
   )
 else()
   target_link_libraries(c-index-test
+    PRIVATE
     libclang
     ${INDEXSTORE_LIB}
     clangAST
@@ -51,14 +51,18 @@ set_target_properties(c-index-test
 
 # If libxml2 is available, make it available for c-index-test.
 if (CLANG_HAVE_LIBXML)
-  include_directories(SYSTEM ${LIBXML2_INCLUDE_DIR})
-  target_link_libraries(c-index-test ${LIBXML2_LIBRARIES})
+  if ((CMAKE_OSX_SYSROOT) AND (EXISTS ${CMAKE_OSX_SYSROOT}/${LIBXML2_INCLUDE_DIR}))
+    include_directories(SYSTEM ${CMAKE_OSX_SYSROOT}/${LIBXML2_INCLUDE_DIR})
+  else()
+    include_directories(SYSTEM ${LIBXML2_INCLUDE_DIR})
+  endif()
+  target_link_libraries(c-index-test PRIVATE ${LIBXML2_LIBRARIES})
 endif()
 
 if(APPLE)
   check_include_files("CoreServices/CoreServices.h" HAVE_CORESERVICES_H)
   if(HAVE_CORESERVICES_H)
-    target_link_libraries(c-index-test "-framework CoreServices")
+    target_link_libraries(c-index-test PRIVATE "-framework CoreServices")
   endif()
 endif()
 
@@ -76,10 +80,8 @@ if (NOT LLVM_INSTALL_TOOLCHAIN_ONLY)
     COMPONENT c-index-test)
 
   if (NOT CMAKE_CONFIGURATION_TYPES) # don't add this for IDE's.
-    add_custom_target(install-c-index-test
-      DEPENDS c-index-test
-      COMMAND "${CMAKE_COMMAND}"
-              -DCMAKE_INSTALL_COMPONENT=c-index-test
-              -P "${CMAKE_BINARY_DIR}/cmake_install.cmake")
+    add_llvm_install_targets(install-c-index-test
+                             DEPENDS c-index-test
+                             COMPONENT c-index-test)
   endif()
 endif()
